@@ -13,6 +13,11 @@ export default defineConfig({
     tailwindcss(),
     react(),
   ],
+  // Inline PostCSS config stops Vite from walking up and loading a parent
+  // postcss.config.js (Tailwind is handled by @tailwindcss/vite, not PostCSS).
+  css: {
+    postcss: {},
+  },
   resolve: {
     alias: {
       'flow-sdk': path.resolve(__dirname, './src/flow-sdk.ts'),

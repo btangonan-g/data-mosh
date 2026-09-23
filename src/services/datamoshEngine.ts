@@ -27,8 +27,10 @@ import {
     Mp4OutputFormat,
     BufferTarget,
     MP4,
+    ALL_FORMATS,
 } from 'mediabunny';
 import type { MoshSettings, MoshRegion } from '../types';
+import { planABTransition, buildABStream, sweepColumns, type ABOptions, type ABPlan } from './abTransition';
 
 const FPS = 30;
 
@@ -77,15 +79,21 @@ async function reencodeSegment(
     startSec?: number,
     durSec?: number,
     scaleToSize?: { w: number; h: number },
+    fps?: number,
+    mosh?: { crf: number },
 ): Promise<Uint8Array> {
     const args: string[] = [];
     if (startSec !== undefined && startSec > 0) args.push('-ss', startSec.toFixed(3));
     args.push('-i', inputFile);
     if (durSec !== undefined) args.push('-t', durSec.toFixed(3));
+    const filters: string[] = [];
     // Force same resolution for transition clips: critical for packet compatibility
     if (scaleToSize) {
-        args.push('-vf', `scale=${scaleToSize.w}:${scaleToSize.h}:force_original_aspect_ratio=decrease,pad=${scaleToSize.w}:${scaleToSize.h}:(ow-iw)/2:(oh-ih)/2`);
+        filters.push(`scale=${scaleToSize.w}:${scaleToSize.h}:force_original_aspect_ratio=decrease,pad=${scaleToSize.w}:${scaleToSize.h}:(ow-iw)/2:(oh-ih)/2`);
     }
+    // One packet per timeline frame, so packet counts match frame-based plans.
+    if (fps) filters.push(`fps=${fps}`);
+    if (filters.length) args.push('-vf', filters.join(','));
     args.push(
         '-vcodec', 'libx264',
         '-g', '99999999',
@@ -93,8 +101,11 @@ async function reencodeSegment(
         '-flags:v', '+cgop',
         '-pix_fmt', 'yuv420p',
         '-movflags', 'faststart',
-        '-crf', '15',
+        '-crf', String(mosh?.crf ?? 15),
         '-preset', 'ultrafast',
+        // A→B: no scene-cut keyframes (they would heal the mosh instantly), and
+        // stitchable headers so a different CRF for B keeps A's SPS/PPS valid.
+        ...(mosh ? ['-sc_threshold', '0', '-x264-params', 'stitchable=1'] : []),
         '-an',
         outputFile,
     );
@@ -105,7 +116,7 @@ async function reencodeSegment(
 }
 
 /** Extract encoded packets from an MP4 buffer via mediabunny */
-interface PacketInfo { chunk: EncodedVideoChunk; isKey: boolean; }
+interface PacketInfo { chunk: EncodedVideoChunk; isKey: boolean; byteLength: number; }
 
 async function extractPacketsFromData(
     mp4Data: Uint8Array,
@@ -124,7 +135,7 @@ async function extractPacketsFromData(
     const packets: PacketInfo[] = [];
     for await (const packet of sink.packets()) {
         const chunk = packet.toEncodedVideoChunk();
-        packets.push({ chunk, isKey: chunk.type === 'key' });
+        packets.push({ chunk, isKey: chunk.type === 'key', byteLength: chunk.byteLength });
     }
     input.dispose();
     return { packets, config };
@@ -633,4 +644,313 @@ export async function renderFullTimeline(
     };
     cleanup();
     return { url, blob: outputBlob };
+}
+
+// ─── A → B two-clip transition ──────────────────────────────────────────
+
+export type ABAudioMode = 'none' | 'keep';
+
+export interface ABResult extends MoshResult {
+    plan: ABPlan;
+    /** Set when audio was requested but could not be kept. */
+    audioNote?: string;
+}
+
+interface VideoInfo {
+    width: number;
+    height: number;
+    duration: number;
+    hasAudio: boolean;
+}
+
+async function getVideoInfo(file: File): Promise<VideoInfo> {
+    const input = new Input({ source: new MBBlobSource(file), formats: ALL_FORMATS });
+    try {
+        const track = await input.getPrimaryVideoTrack();
+        if (!track) throw new Error(`No video track found in ${file.name}`);
+        const duration = await input.computeDuration();
+        const hasAudio = (await input.getPrimaryAudioTrack()) !== null;
+        // H.264 needs even dimensions; display size avoids coded padding (1080 → 1088).
+        const even = (n: number) => Math.max(2, n - (n % 2));
+        return { width: even(track.displayWidth), height: even(track.displayHeight), duration, hasAudio };
+    } finally {
+        input.dispose();
+    }
+}
+
+/** Every segment joined by stream-copy concat must share codec settings and timebase. */
+const X264_SEGMENT_ARGS = [
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '18',
+    '-pix_fmt', 'yuv420p',
+    // WebCodecs tags the mosh segment BT.709 limited range. Tag every segment the
+    // same, or players switch color conversion at each join and the picture pops.
+    '-colorspace', 'bt709',
+    '-color_primaries', 'bt709',
+    '-color_trc', 'bt709',
+    '-color_range', 'tv',
+    '-video_track_timescale', String(FPS * 3000),
+];
+
+/** Re-encode a clean span, letterboxed to the output size, at the timeline frame rate. */
+async function encodeCleanSpan(
+    inputFile: string,
+    outputFile: string,
+    startSec: number,
+    frames: number,
+    dims: { w: number; h: number },
+): Promise<void> {
+    await ffmpegService.exec([
+        '-ss', startSec.toFixed(6),
+        '-i', inputFile,
+        '-frames:v', String(frames),
+        '-vf', `scale=${dims.w}:${dims.h}:force_original_aspect_ratio=decrease,pad=${dims.w}:${dims.h}:(ow-iw)/2:(oh-ih)/2,fps=${FPS}`,
+        ...X264_SEGMENT_ARGS,
+        '-an',
+        '-y', outputFile,
+    ]);
+}
+
+/** Decode clean B frames for the sweep window, keyed by B frame index (0 = B's keyframe). */
+async function decodeCleanFrames(
+    packets: PacketInfo[],
+    config: VideoDecoderConfig,
+    firstB: number,
+    lastB: number,
+): Promise<Map<number, VideoFrame>> {
+    const frames = new Map<number, VideoFrame>();
+    let n = 0;
+    const decoder = new VideoDecoder({
+        error: (e) => console.debug('Clean B decode:', e.message),
+        output: (frame) => {
+            const index = n++;
+            if (index >= firstB && index <= lastB) frames.set(index, frame);
+            else frame.close();
+        },
+    });
+    decoder.configure(config);
+    for (const p of packets.slice(0, lastB + 1)) {
+        while (decoder.decodeQueueSize > 16) await new Promise(r => setTimeout(r, 1));
+        decoder.decode(p.chunk);
+    }
+    await decoder.flush();
+    decoder.close();
+    return frames;
+}
+
+/**
+ * Decode the moshed stream and re-encode it frame by frame (no whole-clip buffering).
+ * In sweep mode each output frame showing B frame b gets the first sweepColumns()
+ * 16 px columns replaced by clean B frame b: an intra-refresh style repaint.
+ * Melt and hold composite nothing: the output is exactly what the decoder produced.
+ */
+interface HealContext {
+    window: { firstB: number; lastB: number };
+    clean: Map<number, VideoFrame>;
+}
+
+async function encodeMoshSegment(
+    chunks: EncodedVideoChunk[],
+    bIndex: number[],
+    config: VideoDecoderConfig,
+    width: number,
+    height: number,
+    sweep?: HealContext,
+): Promise<{ data: Uint8Array; frames: number }> {
+    const target = new BufferTarget();
+    const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target });
+    const videoSource = new EncodedVideoPacketSource('avc');
+    output.addVideoTrack(videoSource);
+    await output.start();
+
+    let muxChain: Promise<void> = Promise.resolve();
+    let encoderError: unknown = null;
+    const encoder = new VideoEncoder({
+        output: (chunk, meta) => {
+            muxChain = muxChain.then(() => videoSource.add(EncodedPacket.fromEncodedChunk(chunk), meta ?? undefined));
+        },
+        error: (e) => { encoderError = e; },
+    });
+    encoder.configure({ codec: 'avc1.4d0034', width, height, bitrate: 8_000_000, framerate: FPS });
+
+    const canvas = sweep ? new OffscreenCanvas(width, height) : null;
+    const ctx = canvas ? canvas.getContext('2d') : null;
+    const frameDuration = 1_000_000 / FPS;
+    let n = 0;
+    const decoder = new VideoDecoder({
+        error: (e) => console.debug('Decoder (expected mosh):', e.message),
+        output: (frame) => {
+            const i = n++;
+            const b = bIndex[i] ?? -1;
+            const clean = sweep && b > 0 ? sweep.clean.get(b) : undefined;
+            let out: VideoFrame;
+            if (ctx && canvas && clean && sweep) {
+                const cleanWidth = Math.min(width, sweepColumns(width, b, sweep.window) * 16);
+                ctx.drawImage(frame, 0, 0, width, height);
+                if (cleanWidth > 0) ctx.drawImage(clean, 0, 0, cleanWidth, height, 0, 0, cleanWidth, height);
+                out = new VideoFrame(canvas, { timestamp: i * frameDuration, duration: frameDuration });
+            } else {
+                out = new VideoFrame(frame, { timestamp: i * frameDuration, duration: frameDuration });
+            }
+            frame.close();
+            encoder.encode(out, { keyFrame: i === 0 });
+            out.close();
+        },
+    });
+    decoder.configure(config);
+    for (const chunk of chunks) {
+        while (decoder.decodeQueueSize > 16 || encoder.encodeQueueSize > 16) {
+            await new Promise(r => setTimeout(r, 1));
+        }
+        try { decoder.decode(chunk); } catch (e) { /* corrupt references are the point */ }
+    }
+    await decoder.flush().catch(() => {});
+    if (decoder.state !== 'closed') decoder.close();
+    await encoder.flush();
+    encoder.close();
+    await muxChain;
+    if (encoderError) throw encoderError;
+    if (n === 0) throw new Error('Decoder produced no frames');
+    await output.finalize();
+    return { data: new Uint8Array(target.buffer), frames: n };
+}
+
+/**
+ * Datamosh from clip A into clip B (I-frame removal melt). A plays clean up to
+ * the cut, then B's delta frames play 1:1 on A's last frame; B takes over through
+ * its residuals (melt), a column sweep (sweep), or a sticky smear that then melts
+ * (hold). Output size follows clip A.
+ */
+export async function renderABTransition(
+    fileA: File,
+    fileB: File,
+    options: ABOptions,
+    onProgress?: (progress: number) => void,
+    onStatus?: (msg: string) => void,
+    audioMode: ABAudioMode = 'none',
+): Promise<ABResult> {
+    await ensureFFmpegLoaded(onStatus);
+    onStatus?.('Analyzing clips...');
+    const [infoA, infoB] = await Promise.all([getVideoInfo(fileA), getVideoInfo(fileB)]);
+    const dims = { w: infoA.width, h: infoA.height };
+    const plan = planABTransition(infoA.duration, infoB.duration, options, FPS);
+
+    onStatus?.('Loading clips into FFmpeg...');
+    await ffmpegService.writeFile('ab_a.mp4', await fetchFile(fileA));
+    await ffmpegService.writeFile('ab_b.mp4', await fetchFile(fileB));
+
+    const segments: string[] = [];
+    const scratch = ['ab_a.mp4', 'ab_b.mp4', 'ab_concat.txt', 'ab_video.mp4', 'ab_final.mp4'];
+    onProgress?.(0.05);
+
+    try {
+        if (plan.aHead) {
+            onStatus?.(`Clip A: ${plan.aHead.frames} clean frames...`);
+            await encodeCleanSpan('ab_a.mp4', 'ab_seg_head.mp4', plan.aHead.startSec, plan.aHead.frames, dims);
+            segments.push('ab_seg_head.mp4');
+        }
+        onProgress?.(0.2);
+
+        // A's tail and B share every x264 header setting, so B's slices decode against A's SPS/PPS.
+        onStatus?.('Re-encoding the end of clip A as the mosh reference...');
+        const tailData = await reencodeSegment(
+            'ab_a.mp4', 'ab_tail_reenc.mp4', plan.aTail.startSec, plan.aTail.endSec - plan.aTail.startSec, dims, FPS,
+            { crf: 15 },
+        );
+        const { packets: tailPackets, config } = await extractPacketsFromData(tailData);
+        onProgress?.(0.3);
+
+        onStatus?.(`Re-encoding clip B for its motion (heal CRF ${plan.bCrf})...`);
+        const bData = await reencodeSegment('ab_b.mp4', 'ab_b_reenc.mp4', 0, plan.bConsumedSec, dims, FPS, { crf: plan.bCrf });
+        const { packets: bPackets, config: bConfig } = await extractPacketsFromData(bData);
+        onProgress?.(0.45);
+
+        const stream = buildABStream(tailPackets, bPackets, {
+            maxBDeltas: plan.bDeltas,
+            bloomFrames: plan.bloomFrames,
+            carryFrames: plan.carryFrames,
+            hold: options.resolve === 'hold',
+            holdBefore: plan.holdUntilB ?? undefined,
+        });
+        let sweepCtx: HealContext | undefined;
+        if (plan.sweep) {
+            onStatus?.('Decoding clean B for the sweep...');
+            sweepCtx = {
+                window: plan.sweep,
+                clean: await decodeCleanFrames(bPackets, bConfig, plan.sweep.firstB, plan.sweep.lastB),
+            };
+        }
+        const bShown = stream.bIndex.filter(b => b > 0).length;
+        onStatus?.(`Moshing: ${bShown} B frames over ${tailPackets.length} A frames` +
+            (plan.carryFrames ? `, A's motion carried ${plan.carryFrames} frames` : '') +
+            (stream.dropped.length ? `, ${stream.dropped.length} heavy frames held back` : '') + '...');
+        let mosh: { data: Uint8Array; frames: number };
+        try {
+            mosh = await encodeMoshSegment(stream.chunks, stream.bIndex, config, dims.w, dims.h, sweepCtx);
+        } finally {
+            sweepCtx?.clean.forEach(f => f.close());
+        }
+        const moshData = mosh.data;
+        // The WebCodecs segment has its own timebase (1/57600) and profile. Stream-copy
+        // concat of mixed timebases collapses its timestamps, so bring it to the same
+        // x264 settings as the clean segments before joining.
+        await ffmpegService.writeFile('ab_seg_mosh_raw.mp4', moshData);
+        scratch.push('ab_seg_mosh_raw.mp4');
+        await ffmpegService.exec([
+            '-i', 'ab_seg_mosh_raw.mp4',
+            '-vf', `fps=${FPS}`,
+            ...X264_SEGMENT_ARGS,
+            '-an', '-y', 'ab_seg_mosh.mp4',
+        ]);
+        segments.push('ab_seg_mosh.mp4');
+        onProgress?.(0.75);
+
+        if (plan.bTail) {
+            onStatus?.(`Clip B: ${plan.bTail.frames} clean frames...`);
+            await encodeCleanSpan('ab_b.mp4', 'ab_seg_btail.mp4', plan.bTail.startSec, plan.bTail.frames, dims);
+            segments.push('ab_seg_btail.mp4');
+        }
+        onProgress?.(0.85);
+
+        onStatus?.('Joining segments...');
+        await ffmpegService.writeFile('ab_concat.txt',
+            new TextEncoder().encode(segments.map(s => `file '${s}'`).join('\n')));
+        await ffmpegService.exec([
+            '-f', 'concat', '-safe', '0', '-i', 'ab_concat.txt',
+            '-c', 'copy', '-movflags', 'faststart', '-y', 'ab_video.mp4',
+        ]);
+
+        let finalFile = 'ab_video.mp4';
+        let audioNote: string | undefined;
+        if (audioMode === 'keep') {
+            if (!infoA.hasAudio || !infoB.hasAudio) {
+                audioNote = 'One clip has no audio track, so the export is silent.';
+            } else {
+                onStatus?.('Joining audio...');
+                const fmt = 'aformat=sample_rates=48000:channel_layouts=stereo';
+                const gapMs = Math.round(plan.audioGapSec * 1000);
+                const bChain = gapMs > 0 ? `${fmt},adelay=${gapMs}:all=1` : fmt;
+                await ffmpegService.exec([
+                    '-i', 'ab_video.mp4', '-i', 'ab_a.mp4', '-i', 'ab_b.mp4',
+                    '-filter_complex',
+                    `[1:a]atrim=0:${plan.cutSec.toFixed(6)},asetpts=PTS-STARTPTS,${fmt}[a0];` +
+                    `[2:a]asetpts=PTS-STARTPTS,${bChain}[a1];` +
+                    `[a0][a1]concat=n=2:v=0:a=1[aout]`,
+                    '-map', '0:v:0', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                    '-shortest', '-movflags', 'faststart', '-y', 'ab_final.mp4',
+                ]);
+                finalFile = 'ab_final.mp4';
+            }
+        }
+
+        const outputData = await ffmpegService.readFile(finalFile) as Uint8Array;
+        const blob = new Blob([outputData.buffer as any], { type: 'video/mp4' });
+        onProgress?.(1);
+        onStatus?.('Done!');
+        return { url: URL.createObjectURL(blob), blob, plan, audioNote };
+    } finally {
+        for (const f of [...segments, ...scratch]) await ffmpegService.deleteFile(f).catch(() => {});
+    }
 }

@@ -1,6 +1,6 @@
 {
   "name": "data-mosh",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Browser-based video datamosh transition studio powered by WebCodecs, FFmpeg WASM, and mediabunny.",
   "scripts": {
     "dev": "vite",

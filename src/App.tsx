@@ -7,7 +7,8 @@ import { Timeline } from './components/Timeline';
 import { Icon } from './components/Icon';
 import { ScribblyArrow } from './components/ScribblyArrow';
 import { ChromeFrame } from './components/ChromeFrame';
-import { PillButton } from './components/Primitives';
+import { PillButton, SegmentedToggle } from './components/Primitives';
+import { ABTransitionView } from './components/ABTransitionView';
 import { ImagePlus } from 'lucide-react';
 import { MediaState, MoshRegion } from './types';
 
@@ -80,6 +81,7 @@ export default function App() {
     const [statusMsg, setStatusMsg] = useState('');
     const [error, setError] = useState<string | null>(null);
 
+    const [view, setView] = useState<'ab' | 'timeline'>('ab');
     const [audioMode, setAudioMode] = useState<AudioMode>('none');
     const [exportedMedia, setExportedMedia] = useState<{ url: string; blob: Blob } | null>(null);
 
@@ -253,8 +255,28 @@ export default function App() {
 
     const canRender = !!sourceMedia && regions.length > 0 && !isProcessing;
 
+    const viewToggle = (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-40 w-[240px]">
+            <SegmentedToggle
+                value={view}
+                items={[{ value: 'ab', label: 'A → B' }, { value: 'timeline', label: 'Timeline' }]}
+                onChange={(v) => setView(v as 'ab' | 'timeline')}
+            />
+        </div>
+    );
+
+    if (view === 'ab') {
+        return (
+            <>
+                <ABTransitionView />
+                {viewToggle}
+            </>
+        );
+    }
+
     return (
         <div className="fixed inset-0 w-screen h-screen bg-[#141414] text-[#ededed] flex flex-col overflow-hidden font-sans">
+            {viewToggle}
             <div className="flex-1 flex items-stretch min-h-0 w-full max-w-[1400px] mx-auto px-8 py-8 gap-0 overflow-hidden">
                 <div className="flex flex-col min-0 h-full step-panel step-panel-source" style={{ flex: '1 1 0%' }}>
                     <div className="flex-1 flex flex-col items-center justify-center min-h-0">

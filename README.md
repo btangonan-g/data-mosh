@@ -19,6 +19,27 @@ Datamoshing creates visual transitions between two video clips by manipulating v
 
 ---
 
+## 1b. A → B Transition (v1.2)
+
+The default view takes **two videos** and datamoshes from one into the other, the classic I-frame-removal melt:
+
+1. Clip A plays clean up to the **cut point**.
+2. Clip B's keyframe is dropped and **every B delta frame plays 1:1** on top of A's last frame: B's motion drags A's pixels while B's residuals paint B back in.
+3. **Resolve** (no engineered keyframe pop):
+   - **Melt**: B keeps moshing until its own frames take over.
+   - **Sweep**: after a set melt, clean B sweeps in by 16 px columns, left to right, like an x264 periodic intra refresh (composited in the decoder output, since a real intra-refresh encode cannot share A's stream headers).
+   - **Hold**: drops B's intra-heavy delta frames (tomato.py `-k 0.7` style) so the melt lasts longer.
+
+Controls: cut point, resolve, melt-before-sweep and sweep time (Sweep), **heal speed** (B residual strength via x264 CRF 36→14), **bloom burst** (0–12 replayed frames at the cut only), audio. A's tail and B are encoded with identical x264 headers (`stitchable=1`, `sc_threshold 0`, no B-frames). Output size follows clip A; B is letterboxed to fit.
+
+v1.1 replayed every B frame (Smear) and spliced in a clean B keyframe, which produced a one-frame hard cut (SSIM +0.44 in one frame on the S25B→S19 test) and a pose jump. v1.2 on the same clips: largest single-frame SSIM rise 0.08 across the sweep.
+
+- `src/services/abTransition.ts`: pure frame planning and packet splicing (unit tested in `tests/abTransition.test.ts`).
+- `renderABTransition` in `src/services/datamoshEngine.ts`: the render pipeline. Every segment is normalized to 30 fps x264 before the stream-copy join, because mixed timebases collapse timestamps.
+- The original multi-region studio is still available under **Timeline**.
+
+---
+
 ## 2. Architecture & Modules
 
 - **`src/services/datamoshEngine.ts`**: The core timeline rendering pipeline. Manages single-GOP re-encoding (`-g 99999999`), packet stream splicing, WebCodecs hardware decode/encode, and concat demuxing.
