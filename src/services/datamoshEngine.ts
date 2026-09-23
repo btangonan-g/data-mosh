@@ -1,12 +1,12 @@
 /**
- * Datamosh Engine — Full Timeline Renderer (Optimized)
+ * Datamosh Engine: Full Timeline Renderer (Optimized)
  *
  * Pipeline:
  * 1. Sort mosh regions by start time
  * 2. Split the timeline into segments (original gaps + moshed regions)
  * 3. For each original segment: FFmpeg copies from source
  * 4. For each moshed segment:
- *    a) FFmpeg re-encodes with -g 99999999 (single GOP) — required for datamosh
+ *    a) FFmpeg re-encodes with -g 99999999 (single GOP): required for datamosh
  *    b) mediabunny extracts raw encoded packets
  *    c) Packets are manipulated (I-frame removal, repetition, shuffling)
  *    d) VideoDecoder batch-decodes the corrupted stream (NO setInterval)
@@ -82,7 +82,7 @@ async function reencodeSegment(
     if (startSec !== undefined && startSec > 0) args.push('-ss', startSec.toFixed(3));
     args.push('-i', inputFile);
     if (durSec !== undefined) args.push('-t', durSec.toFixed(3));
-    // Force same resolution for transition clips — critical for packet compatibility
+    // Force same resolution for transition clips: critical for packet compatibility
     if (scaleToSize) {
         args.push('-vf', `scale=${scaleToSize.w}:${scaleToSize.h}:force_original_aspect_ratio=decrease,pad=${scaleToSize.w}:${scaleToSize.h}:(ow-iw)/2:(oh-ih)/2`);
     }
@@ -165,7 +165,7 @@ async function moshRegion(
         const { packets: transPackets } = await extractPacketsFromData(transData);
 
         if (transPackets.filter(p => !p.isKey).length === 0) {
-            throw new Error('Transition clip produced no delta frames — try a longer clip');
+            throw new Error('Transition clip produced no delta frames: try a longer clip');
         }
 
         onStatus?.(`Building transition stream (${srcPackets.length} + ${transPackets.length} packets)...`);

@@ -19,12 +19,12 @@ interface SidebarProps {
 }
 
 const MODES: { id: MoshMode; label: string; icon: string; desc: string }[] = [
-    { id: 'liquid', label: 'Liquid', icon: 'water_drop', desc: 'I-frame removal — pixels melt' },
-    { id: 'bloom', label: 'Bloom', icon: 'flare', desc: 'Segment shuffle — motion explosion' },
-    { id: 'stutter', label: 'Stutter', icon: 'stacked_bar_chart', desc: 'Temporal destruction — skip & loop' },
-    { id: 'reverse', label: 'Reverse', icon: 'undo', desc: 'Backward P-frames — reverse motion glitch' },
-    { id: 'pulse', label: 'Pulse', icon: 'monitor_heart', desc: 'Keyframe heartbeat — clean/glitch cycle' },
-    { id: 'transition', label: 'Transition', icon: 'swap_horiz', desc: 'Two-clip mosh — morph between videos' },
+    { id: 'liquid', label: 'Liquid', icon: 'water_drop', desc: 'I-frame removal: pixels melt' },
+    { id: 'bloom', label: 'Bloom', icon: 'flare', desc: 'Segment shuffle: motion explosion' },
+    { id: 'stutter', label: 'Stutter', icon: 'stacked_bar_chart', desc: 'Temporal destruction: skip and loop' },
+    { id: 'reverse', label: 'Reverse', icon: 'undo', desc: 'Backward P-frames: reverse motion glitch' },
+    { id: 'pulse', label: 'Pulse', icon: 'monitor_heart', desc: 'Keyframe heartbeat: clean/glitch cycle' },
+    { id: 'transition', label: 'Transition', icon: 'swap_horiz', desc: 'Two-clip mosh: morph between videos' },
 ];
 
 const MODE_COLORS: Record<string, string> = {
@@ -36,7 +36,7 @@ const MODE_COLORS: Record<string, string> = {
     transition: '#8000cc',
 };
 
-// ── Robust Base64 Decoder (localized) ──
+// ── Base64 Decoder (localized) ──
 function base64ToUint8Array(base64: string) {
     const binaryString = atob(base64.replace(/\s/g, ''));
     const bytes = new Uint8Array(binaryString.length);
@@ -57,9 +57,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
         try {
             const media = await Flow.media.select({ filter: 'video' });
             if (media && media.type === 'video') {
-                const bytes = base64ToUint8Array(media.base64);
-                const blob = new Blob([bytes], { type: media.mimeType });
-                const file = new File([blob], media.name || 'transition.mp4', { type: media.mimeType });
+                const file = media.file || (() => {
+                    const bytes = base64ToUint8Array(media.base64 || '');
+                    const blob = new Blob([bytes], { type: media.mimeType });
+                    return new File([blob], media.name || 'transition.mp4', { type: media.mimeType });
+                })();
                 
                 onUpdateRegion(selectedRegion.id, { 
                     transitionFile: file, 
@@ -98,7 +100,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                                 {MODES.find(m => m.id === region.mode)?.label || region.mode}
                                             </span>
                                             <span className="text-[11px] text-[rgba(255,255,255,0.3)] tracking-[0.1px]">
-                                                {formatMs(region.startMs)} – {formatMs(region.startMs + region.durationMs)}
+                                                {formatMs(region.startMs)} to {formatMs(region.startMs + region.durationMs)}
                                             </span>
                                         </div>
                                     </button>
@@ -149,7 +151,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             </div>
                         </div>
 
-                        {/* Secondary clip picker — only for transition mode */}
+                        {/* Secondary clip picker: only for transition mode */}
                         {selectedRegion.mode === 'transition' && (
                             <div className="flex flex-col gap-2 items-start w-full">
                                 {selectedRegion.transitionName ? (
@@ -199,7 +201,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </div>
                     </>
                 )}
-                {/* Audio toggle — always visible when media is loaded */}
+                {/* Audio toggle: always visible when media is loaded */}
                 {hasMedia && (
                     <div className="flex flex-col gap-2 items-start w-full">
                         <SectionLabel>Audio</SectionLabel>

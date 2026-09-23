@@ -1,7 +1,7 @@
 import React, { useId, useMemo, useRef, useState, useEffect } from 'react';
 
 /**
- * ChromeFrame — Liquid metal border effect.
+ * ChromeFrame: Liquid metal border effect.
  * 
  * Uses the "gooey" SVG filter technique:
  * blur → color matrix threshold → specular + diffuse lighting

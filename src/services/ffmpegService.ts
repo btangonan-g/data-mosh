@@ -1,5 +1,5 @@
 /**
- * FFmpegService — Manual Worker Management
+ * FFmpegService: Manual Worker Management
  * 
  * Bypasses @ffmpeg/ffmpeg and @ffmpeg/util to avoid CORS/atob issues in the 
  * Flow sandboxed iframe. 
@@ -18,10 +18,17 @@ class FFmpegService {
   private logCallback?: (msg: string) => void;
   private progressCallback?: (p: { progress: number }) => void;
   private loaded = false;
+  private loadingPromise?: Promise<void>;
 
   async load(onLog?: (msg: string) => void) {
     if (this.loaded) return;
+    if (this.loadingPromise) return this.loadingPromise;
     this.logCallback = onLog;
+    this.loadingPromise = this.internalLoad(onLog);
+    return this.loadingPromise;
+  }
+
+  private async internalLoad(onLog?: (msg: string) => void) {
 
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
 

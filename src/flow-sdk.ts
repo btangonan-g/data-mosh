@@ -1,7 +1,7 @@
 /**
  * flow-sdk Local Shim
  * 
- * Provides seamless local browser fallbacks for Google Flow SDK APIs,
+ * Provides local browser fallbacks for Google Flow SDK APIs,
  * allowing the datamosh application to run both locally and inside Google Flow.
  */
 

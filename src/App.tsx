@@ -11,7 +11,7 @@ import { PillButton } from './components/Primitives';
 import { ImagePlus } from 'lucide-react';
 import { MediaState, MoshRegion } from './types';
 
-// ── Robust Base64 Decoder ──
+// ── Base64 Decoder ──
 function base64ToUint8Array(base64: string) {
     const binaryString = atob(base64.replace(/\s/g, ''));
     const bytes = new Uint8Array(binaryString.length);
@@ -174,10 +174,12 @@ export default function App() {
         try {
             const media = await Flow.media.select({ filter: 'video' });
             if (media && media.type === 'video') {
-                const bytes = base64ToUint8Array(media.base64);
-                const blob = new Blob([bytes], { type: media.mimeType });
-                const file = new File([blob], media.name || 'video.mp4', { type: media.mimeType });
-                const dataUrl = URL.createObjectURL(file);
+                const file = media.file || (() => {
+                    const bytes = base64ToUint8Array(media.base64 || '');
+                    const blob = new Blob([bytes], { type: media.mimeType });
+                    return new File([blob], media.name || 'video.mp4', { type: media.mimeType });
+                })();
+                const dataUrl = media.dataUrl || URL.createObjectURL(file);
 
                 setSourceMedia({ id: media.mediaId, dataUrl, name: media.name || 'video.mp4', type: 'video', file });
                 setExportedMedia(null);
